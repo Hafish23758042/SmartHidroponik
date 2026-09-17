@@ -396,6 +396,26 @@ void syncDwinMaster() {
     uint16_t offVals[4] = {0, 0, 0, 0};
     dwinWriteBlock(0x5120, 4, offVals);
     delay(MODBUS_GAP_MS);
+
+#if DWIN_STANDBY_ENABLED
+    // Konfigurasi Mode Hemat Energi / Auto-Sleep Layar DWIN:
+    // Register 0x0082: High Byte = Kecerahan Aktif (0-100), Low Byte =
+    // Kecerahan Standby (0=Mati) Register 0x0083: Waktu tunggu sebelum standby
+    // (satuan 10ms: detik * 100) Fitur Touch-to-Wake: Sentuhan pertama saat
+    // tidur HANYA menyalakan backlight dan tidak akan memicu eksekusi tombol
+    // secara tidak sengaja.
+    uint16_t standbyCfg[2];
+    standbyCfg[0] = ((uint16_t)DWIN_BRIGHTNESS_ON << 8) |
+                    ((uint16_t)DWIN_BRIGHTNESS_STANDBY & 0xFF);
+    standbyCfg[1] = (uint16_t)(DWIN_STANDBY_TIMEOUT_S * 100);
+    dwinWriteBlock(0x0082, 2, standbyCfg);
+    delay(MODBUS_GAP_MS);
+    Serial.printf("[DWIN] Mode Hemat Energi Diatur: Aktif=%d%%, Standby=%d%%, "
+                  "Timeout=%ds\n",
+                  DWIN_BRIGHTNESS_ON, DWIN_BRIGHTNESS_STANDBY,
+                  DWIN_STANDBY_TIMEOUT_S);
+#endif
+
     dwinBootResetDone = true;
     return; // Lewati pembacaan tombol di siklus pertama boot
   }

@@ -21,6 +21,17 @@
 // secara aktif me-request sensor dan membaca/menulis ke HMI (Slave ID 8).
 #define DWIN_SLAVE_ID 8
 
+// ------------------------------------ Mode Hemat Energi Layar DWIN (Standby)
+// Layar DMG10600C101_15WTR (T5L DGUS II) mendukung auto sleep / backlight off.
+// Saat standby tercapai, backlight mati (0%). Saat layar disentuh, hardware
+// otomatis menyalakan backlight kembali ke nilai ON (Touch-to-Wake aman).
+#define DWIN_STANDBY_ENABLED true
+#define DWIN_BRIGHTNESS_ON 100 // Kecerahan saat aktif (0-100%)
+#define DWIN_BRIGHTNESS_STANDBY                                                \
+  0 // Kecerahan saat standby (0% = mati total / hemat energi)
+#define DWIN_STANDBY_TIMEOUT_S                                                 \
+  60 // Waktu tunggu mati otomatis tanpa sentuhan (detik)
+
 // Slot per node: 8 node (7 sensor + 1 layar DWIN HMI).
 // Total 1000 ms / 8 node = 125 ms per slot transaksi.
 // Timeout 150 ms cukup untuk 9600 baud tanpa memblokir bus bila ada node yang
@@ -204,7 +215,6 @@ const uint32_t RELAY_MAX_ON_MS[4] = {
 #define MQTT_BASE "hydroponik/unit01"
 #define TOPIC_RELAY_BASE "polinela/lab/relay"
 #define MQTT_RETRY_MS 5000UL
-
 #define TELEMETRY_MS 60000UL // telemetri berkala
 #define HEARTBEAT_MS 60000UL
 
