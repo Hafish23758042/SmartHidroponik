@@ -63,6 +63,15 @@ const uint32_t RELAY_MAX_ON_MS[4] = {
     0UL       // pompa utama    : tanpa batas (atau sesuaikan bila perlu)
 };
 
+// ---------------------------------------------------- Proteksi Lock Relay &
+// Alarm Set false untuk MEMATIKAN penguncian permanen (lock/latch) pada relay
+// nutrisi:
+// - Alarm kritis tidak akan mengunci relay 1 (dosing tetap fleksibel)
+// - Perintah manual (DWIN HMI & MQTT) tidak ditolak oleh alarm
+// - Relay guard tetap mematikan relay saat timeout tanpa mengunci permanen
+// (tanpa latch)
+#define RELAY_LOCK_ENABLED false
+
 // ------------------------------------------------------- Sakelar pelampung
 // TIDAK TERPASANG. Nilai -1 menonaktifkan pembacaan sepenuhnya:
 // floatHigh() selalu mengembalikan false dan alarm C08 tidak pernah naik.
@@ -101,6 +110,11 @@ const uint32_t RELAY_MAX_ON_MS[4] = {
 #define LEVEL_RESUME_PCT 20.0f // histeresis pemulihan
 
 // ------------------------------------------------- Titik operasi dosing
+// Mode otomatis pendosisan nutrisi:
+// Set false agar relay 1 (pompa nutrisi) TIDAK berjalan otomatis (hanya mode
+// manual DWIN HMI / MQTT / Serial).
+#define AUTO_DOSING_ENABLED false
+
 // Faktor TDS pada ECTDS10-ISO = 0.50  ->  ppm = uS/cm * 0.50
 // PERIKSA skala TDS pen Anda (0.5 vs 0.7) sebelum produksi.
 #define TDS_FACTOR 0.50f
@@ -195,9 +209,14 @@ const uint32_t RELAY_MAX_ON_MS[4] = {
 #define NTP_DAYLIGHT 0                // Indonesia tidak pakai DST
 
 // -------------------------------------------------------- Jaringan & Layanan
-#define WIFI_SSID "IET"
-#define WIFI_PASS "meeting!!"
-#define WIFI_RETRY_MS 30000UL
+// WiFiManager (Captive Portal Web Configuration)
+#define WM_AP_NAME "HydroController-AP"
+#define WM_AP_PASSWORD                                                         \
+  "" // Kosongkan bila tanpa password (Open AP), atau isi min. 8 karakter
+     // (misal: "admin123")
+#define WM_PORTAL_TIMEOUT_S                                                    \
+  180 // Batas waktu captive portal sebelum lanjut offline (detik)
+#define WIFI_RETRY_MS 30000UL // Interval percobaan koneksi ulang jika terputus
 
 // OTA (Over-The-Air Update)
 #define OTA_HOSTNAME "HydroController-ESP32"

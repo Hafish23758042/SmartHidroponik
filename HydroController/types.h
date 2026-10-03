@@ -179,6 +179,8 @@ void fmt(char *dst, size_t n, float v, uint8_t dec);
 void publishTelemetry();
 void publishHeartbeat();
 void onMqtt(char *topic, byte *payload, unsigned int len);
+void setupWifi();
+void resetWifiSettings();
 void loopWifi();
 void loopMqtt();
 void getTimestamp(char *dst, size_t n);

@@ -35,9 +35,21 @@ Sistem ini mengendalikan sistem hidroponik terpadu secara cerdas dan andal:
 
 ## 🛠️ Persyaratan & Instalasi
 1. **Arduino IDE / PlatformIO** dengan board package ESP32 (ESP32-S3 atau board yang kompatibel).
-2. Library:
-   - Arduino core for ESP32
+2. **Library yang Dibutuhkan** (dapat diinstall via Library Manager):
+   - **WiFiManager** (oleh *tzapu*, versi 2.0.x ke atas)
+   - **PubSubClient** (oleh *Nick O'Leary*)
+   - ArduinoOTA & WiFi (bawaan ESP32 core)
 3. Buka folder `HydroController/` di Arduino IDE, pilih board dan port COM yang sesuai, lalu lakukan compile dan upload.
+
+## 📶 Konfigurasi WiFi (WiFiManager Captive Portal)
+1. Saat pertama kali dinyalakan atau bila WiFi tidak terjangkau, ESP32 akan membuat Access Point sendiri bernama **`HydroController-AP`** (tanpa password secara default).
+2. Hubungkan smartphone / laptop ke WiFi **`HydroController-AP`**.
+3. Portal captive web akan otomatis terbuka (atau buka browser ke alamat IP `192.168.4.1`).
+4. Pilih **Configure WiFi**, pilih SSID jaringan lokal Anda, masukkan password, lalu simpan (*Save*).
+5. ESP32 akan tersambung ke jaringan lokal Anda dan menyimpan kredensial ke memori internal (NVS).
+6. **Keamanan & Keandalan**:
+   - Jika portal tidak disentuh selama 180 detik (*timeout*), sistem akan otomatis melanjutkan eksekusi agar kontrol nutrisi dan pembacaan sensor tetap berjalan normal (*offline mode*).
+   - Untuk mereset kredensial WiFi, kirim perintah `RESETWIFI` melalui Serial Monitor (115200 baud) atau publish topic MQTT `hydroponik/unit01/cmd` dengan pesan `resetwifi`.
 
 ## 📖 Dokumentasi Lengkap
 Silakan baca file dokumentasi berikut untuk detail teknis:

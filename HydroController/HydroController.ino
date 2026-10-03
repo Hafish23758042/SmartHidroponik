@@ -4,7 +4,7 @@
 //
 //  Prinsip perancangan:
 //    1. Kendali berjalan penuh tanpa jaringan. Wi-Fi hanya pelaporan.
-//    2. Keselamatan diperiksa SETIAP loop, terlepas dari logika kendali.
+//    2. Keselamatan diperiksa SETIx`AP loop, terlepas dari logika kendali.
 //    3. Kondisi awal = kondisi aman (semua relay OFF).
 //    4. Nilai sensor adalah klaim yang harus dibuktikan, bukan fakta.
 // =====================================================================
@@ -13,9 +13,15 @@
 #include "types.h"
 #include <ArduinoOTA.h>
 #include <PubSubClient.h>
+#include <Update.h>
+#include <WebServer.h>
 #include <WiFi.h>
+#include <WiFiManager.h>
 #include <esp_task_wdt.h>
 #include <math.h>
+
+// Web Server untuk Web Browser OTA di port 80
+WebServer otaWebServer(80);
 
 // Server Telnet untuk pemantauan Serial Monitor via TCP
 WiFiServer telnetServer(TELNET_PORT);
@@ -524,8 +530,18 @@ void handleSerialCommands() {
         cmd.toLowerCase();
         if (cmd == "scan" || cmd == "scanmodbus" || cmd == "slave") {
           scanSlaveIds();
+        } else if (cmd == "resetwifi" || cmd == "wmreset") {
+          resetWifiSettings();
+        } else if (cmd == "wifi" || cmd == "wifistatus") {
+          if (WiFi.status() == WL_CONNECTED) {
+            Serial.printf("[WIFI] Terhubung ke: %s | IP: %s | RSSI: %d dBm\n",
+                          WiFi.SSID().c_str(),
+                          WiFi.localIP().toString().c_str(), WiFi.RSSI());
+          } else {
+            Serial.println("[WIFI] Status: Tidak terhubung ke WiFi.");
+          }
         } else {
-          Serial.println("Perintah tersedia: SCAN");
+          Serial.println("Perintah tersedia: SCAN, RESETWIFI, WIFISTATUS");
         }
       }
       input = "";
@@ -834,8 +850,10 @@ void setRelay(uint8_t ch, bool on) {
     return;
   if (!relayEnabled[ch])
     on = false; // kanal nonaktif dipaksa mati
+#if RELAY_LOCK_ENABLED
   if (relayLatch[ch])
     on = false; // terkunci sampai reset manual
+#endif
   if (relayState[ch] == on)
     return;
 
@@ -886,20 +904,18 @@ void forceOff(uint8_t ch) {
   publishRelayState(ch);
 }
 
-// Dipanggil pada SETIAP loop. Ini adalah lapisan yang berada di bawah
-// logika kendali: kesalahan logika di atas tetap tidak bisa melanggarnya.
+// Dipanggil pada SETIAP loop. Hanya mencatat alarm durasi — relay TIDAK
+// disentuh oleh guard. Relay hanya boleh dikontrol dari DWIN HMI atau MQTT.
 bool guardTripped = false;
 
 void relayGuard() {
   for (uint8_t i = 0; i < 4; i++) {
-    // Jangan memakai relayOnSince == 0 sebagai penanda "mati": millis()
-    // bernilai 0 tepat setelah boot, sehingga relay yang menyala pada
-    // milidetik pertama tidak akan pernah dijaga. relayState sudah cukup.
     if (!relayState[i] || !RELAY_MAX_ON_MS[i])
       continue;
     if (millis() - relayOnSince[i] > RELAY_MAX_ON_MS[i]) {
-      forceOff(i);
-      relayLatch[i] = true;
+      // CATATAN: relay tidak dimatikan paksa di sini.
+      // Kendali relay HANYA melalui DWIN HMI atau MQTT.
+      // Guard hanya mencatat kejadian untuk alarm dan log.
       guardTripped = true;
       publishEvent("guard_trip", relayName[i]);
     }
@@ -1103,7 +1119,10 @@ void manualClear(uint8_t ch) {
 bool manualAllowed(uint8_t ch, bool on) {
   if (!on)
     return true;
-  if (ch >= 4 || !relayEnabled[ch] || relayLatch[ch])
+  if (ch >= 4 || !relayEnabled[ch])
+    return false;
+#if RELAY_LOCK_ENABLED
+  if (relayLatch[ch])
     return false;
   if (ch == R_PUMP) {
     // Interlock pompa tetap berlaku untuk perintah manual.
@@ -1112,6 +1131,7 @@ bool manualAllowed(uint8_t ch, bool on) {
     if (floatHigh())
       return false;
   }
+#endif
   return true;
 }
 
@@ -1138,6 +1158,10 @@ uint32_t doseT0 = 0;          // awal dosis / awal jeda campur
 uint32_t doseWindowStart = 0; // jendela 24 jam
 
 const char *doseStateName() {
+  if (!AUTO_DOSING_ENABLED) {
+    return manualActive(R_PUMP) ? "manual_on" : "manual_off";
+  }
+
   switch (doseState) {
   case D_IDLE:
     return "idle";
@@ -1160,57 +1184,69 @@ void doseLock(const char *why) {
 }
 
 void controlDosing() {
+  // CATATAN: Fungsi ini hanya melacak state dosing dan alarm.
+  // Relay TIDAK disentuh di sini — kendali relay HANYA melalui DWIN HMI atau
+  // MQTT.
+
+  if (!AUTO_DOSING_ENABLED) {
+    // Dosing otomatis dinonaktifkan; hanya catat state untuk telemetri.
+    return;
+  }
+
   // Jendela harian bergulir. Untuk penanggalan sebenarnya gunakan NTP.
   if (millis() - doseWindowStart > DOSE_WINDOW_MS) {
     doseWindowStart = millis();
     doseCount = 0;
   }
 
-  // Kondisi yang mengunci pendosisan, diperiksa lebih dulu.
+  // Lacak kondisi penguncian untuk alarm — tanpa menyentuh relay.
+#if RELAY_LOCK_ENABLED
   if (doseState != D_LOCKED) {
-    // C07 bersifat global (ketujuh node). Mengunci pompa nutrisi karena
-    // sensor suhu udara membeku tidak masuk akal, jadi di sini hanya
-    // node EC — indeks 3 — yang diperiksa.
     if (isActive(C01A) || isActive(C01B) || isActive(C02) || nodeBad(3) ||
         isActive(C08) || isActive(C09) || isActive(C10)) {
-      doseLock(isActive(C09) ? "ph_ekstrem"
-               : nodeBad(3)  ? "sensor_ec"
-                             : "alarm_kritis");
+      // Catat lock untuk alarm/telemetri saja, relay tidak dimatikan
+      doseLockWhy = isActive(C09) ? "ph_ekstrem"
+                    : nodeBad(3)  ? "sensor_ec"
+                                  : "alarm_kritis";
+      doseState = D_LOCKED;
+      publishEvent("dose_lock", doseLockWhy);
     } else if (relayLatch[R_PUMP]) {
-      doseLock("relay_latch");
+      doseLockWhy = "relay_latch";
+      doseState = D_LOCKED;
+      publishEvent("dose_lock", doseLockWhy);
     } else if (doseCount >= DOSE_MAX_PER_DAY) {
-      doseLock("plafon_harian");
+      doseLockWhy = "plafon_harian";
+      doseState = D_LOCKED;
+      publishEvent("dose_lock", doseLockWhy);
     }
   }
+#endif
 
-  // Kanal di bawah kendali manual tidak disentuh logika otomatis.
-  if (manualActive(R_PUMP))
-    return;
-
+  // Transisi state mesin dosis hanya untuk pelacakan alarm/telemetri
   switch (doseState) {
 
   case D_IDLE:
-    setRelay(R_PUMP, false);
-    // Hanya mendosis bila data sahih DAN benar-benar di bawah ambang.
+    // Kondisi dosis terpenuhi: catat event saja, relay tidak dinyalakan
+#if RELAY_LOCK_ENABLED
     if (ecOk && fEC.ready && ecV < EC_DOSE_START && !floatHigh() &&
         !(levelOk && levelCritLatch)) {
+#else
+    if (ecOk && fEC.ready && ecV < EC_DOSE_START) {
+#endif
       doseState = D_DOSING;
       doseT0 = millis();
       doseCount++;
-      setRelay(R_PUMP, true);
       publishEvent("dose_start", "");
     }
     break;
 
   case D_DOSING:
-    if (!ecOk || floatHigh()) { // data hilang saat mendosis
-      setRelay(R_PUMP, false);
+    if (!ecOk || floatHigh()) {
       doseState = D_MIXING;
       doseT0 = millis();
       break;
     }
     if (millis() - doseT0 >= DOSE_MS || ecV >= EC_DOSE_STOP) {
-      setRelay(R_PUMP, false);
       doseState = D_MIXING;
       doseT0 = millis();
       publishEvent("dose_end", "");
@@ -1218,16 +1254,15 @@ void controlDosing() {
     break;
 
   case D_MIXING:
-    setRelay(R_PUMP, false);
-    // Inti pencegahan overdosis: JANGAN mengevaluasi EC sebelum
-    // larutan homogen, atau sistem akan mendosis berulang.
     if (millis() - doseT0 >= MIX_WAIT_MS)
       doseState = D_IDLE;
     break;
 
   case D_LOCKED:
-    setRelay(R_PUMP, false);
-    break; // hanya keluar via reset manual
+#if !RELAY_LOCK_ENABLED
+    doseState = D_IDLE;
+#endif
+    break;
   }
 }
 
@@ -1241,16 +1276,12 @@ uint32_t mistLastStart = 0;
 bool climateHot = false; // status histeresis
 
 void controlClimate() {
-  const bool mistManual = manualActive(R_MIST);
-  const bool fanManual = manualActive(R_FAN);
+  // CATATAN: Fungsi ini hanya memperbarui state iklim (histeresis, latch).
+  // Relay TIDAK disentuh di sini — kendali relay HANYA melalui DWIN HMI atau
+  // MQTT.
 
-  if (!airOk) {
-    if (!mistManual)
-      setRelay(R_MIST, false);
-    if (!fanManual)
-      setRelay(R_FAN, false);
+  if (!airOk)
     return;
-  }
 
   if (!climateHot && airT > CLIMATE_T_ON)
     climateHot = true;
@@ -1259,21 +1290,7 @@ void controlClimate() {
 
   bool rhKnown = !isnan(airRh);
 
-  // ---- misting ----
-  bool mistWant = climateHot && rhKnown && airRh < MIST_RH_CEILING;
-  if (mistManual) { /* dilewati */
-  } else if (relayState[R_MIST]) {
-    if (!mistWant || millis() - mistLastStart >= MIST_BURST_MS)
-      setRelay(R_MIST, false);
-  } else if (mistWant && !relayLatch[R_MIST]) {
-    // siklus kerja: satu semburan per periode
-    if (mistLastStart == 0 || millis() - mistLastStart >= MIST_PERIOD_MS) {
-      mistLastStart = millis();
-      setRelay(R_MIST, true);
-    }
-  }
-
-  // ---- exhaust fan ----
+  // Perbarui latch RH fan — hanya untuk pemantauan/alarm, relay tidak disentuh
   static bool fanRhLatch = false;
   if (rhKnown) {
     if (!fanRhLatch && airRh > FAN_RH_ON)
@@ -1281,13 +1298,6 @@ void controlClimate() {
     if (fanRhLatch && airRh < FAN_RH_OFF)
       fanRhLatch = false;
   }
-  // Fan tidak boleh menyala saat misting bekerja: kabut akan terbuang
-  // sebelum sempat menguap dan mendinginkan.
-  bool fanWant =
-      (fanRhLatch || (climateHot && rhKnown && airRh >= MIST_RH_CEILING)) &&
-      !relayState[R_MIST];
-  if (!fanManual)
-    setRelay(R_FAN, fanWant);
 }
 
 // =====================================================================
@@ -1506,6 +1516,9 @@ void setupOta() {
   }
 
   ArduinoOTA.onStart([]() {
+    // Matikan watchdog sementara agar tidak reset saat flash partisi erase
+    esp_task_wdt_delete(NULL);
+
     String type =
         (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
     Serial.println("[OTA] Proses update dimulai: " + type);
@@ -1523,6 +1536,7 @@ void setupOta() {
   });
 
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    esp_task_wdt_reset();
     static unsigned int lastPct = 0;
     unsigned int pct = (progress / (total / 100));
     if (pct != lastPct && pct % 10 == 0) {
@@ -1547,13 +1561,86 @@ void setupOta() {
   });
 
   ArduinoOTA.begin();
+
+  // Web Browser OTA Updater di Port 80
+  otaWebServer.on("/", HTTP_GET, []() {
+    otaWebServer.sendHeader("Connection", "close");
+    otaWebServer.send(
+        200, "text/html",
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>HydroController OTA Update</title>"
+        "<style>"
+        "body{font-family:Arial,sans-serif;background:#1e293b;color:#f8fafc;"
+        "display:flex;justify-content:center;align-items:center;min-height:"
+        "100vh;margin:0}"
+        ".card{background:#0f172a;padding:2rem;border-radius:12px;box-shadow:0 "
+        "8px 24px rgba(0,0,0,0.4);max-width:420px;width:90%;text-align:center}"
+        "h2{color:#38bdf8;margin-top:0}"
+        "input[type=file]{margin:1.5rem "
+        "0;padding:0.75rem;background:#334155;color:#fff;border-radius:6px;"
+        "width:100%;box-sizing:border-box}"
+        "button{background:#0284c7;color:#fff;border:none;padding:0.75rem "
+        "1.5rem;border-radius:6px;font-size:1rem;cursor:pointer;width:100%;"
+        "font-weight:bold}"
+        "button:hover{background:#0369a1}"
+        "</style></head><body><div class='card'>"
+        "<h2>🌱 HydroController Web OTA</h2>"
+        "<p>Pilih file <b>.bin</b> firmware hasil compile:</p>"
+        "<form method='POST' action='/update' enctype='multipart/form-data'>"
+        "<input type='file' name='update' accept='.bin' required><br>"
+        "<button type='submit'>Unggah & Flash Firmware</button>"
+        "</form></div></body></html>");
+  });
+
+  otaWebServer.on(
+      "/update", HTTP_POST,
+      []() {
+        otaWebServer.sendHeader("Connection", "close");
+        otaWebServer.send(
+            200, "text/html",
+            "<h2 "
+            "style='text-align:center;font-family:sans-serif;color:#22c55e'>"
+            "Update Berhasil! ESP32 me-reboot...</h2>");
+        delay(1000);
+        ESP.restart();
+      },
+      []() {
+        HTTPUpload &upload = otaWebServer.upload();
+        if (upload.status == UPLOAD_FILE_START) {
+          Serial.printf("[WebOTA] Mulai upload: %s\n", upload.filename.c_str());
+          esp_task_wdt_delete(NULL);
+          for (uint8_t i = 0; i < 4; i++) {
+            forceOff(i);
+          }
+          if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+            Update.printError(Serial);
+          }
+        } else if (upload.status == UPLOAD_FILE_WRITE) {
+          if (Update.write(upload.buf, upload.currentSize) !=
+              upload.currentSize) {
+            Update.printError(Serial);
+          }
+        } else if (upload.status == UPLOAD_FILE_END) {
+          if (Update.end(true)) {
+            Serial.printf("[WebOTA] Selesai! Ukuran: %u bytes\n",
+                          upload.totalSize);
+          } else {
+            Update.printError(Serial);
+          }
+        }
+      });
+
+  otaWebServer.begin();
   otaInitialized = true;
   Serial.println("[OTA] ArduinoOTA siap (Port: 3232)");
+  Serial.println("[OTA] Web Browser OTA siap di Port 80");
 }
 
 void loopOta() {
   if (otaInitialized && WiFi.status() == WL_CONNECTED) {
     ArduinoOTA.handle();
+    otaWebServer.handleClient();
   }
 }
 
@@ -1677,7 +1764,48 @@ void onMqtt(char *topic, byte *payload, unsigned int len) {
   } else if (!strcmp(msgLower, "maint_off")) {
     maintenanceMode = false;
     publishEvent("maint", "off");
+  } else if (!strcmp(msgLower, "resetwifi")) {
+    publishEvent("resetwifi", "trigger");
+    resetWifiSettings();
   }
+}
+
+void setupWifi() {
+  WiFiManager wm;
+
+  // Timeout portal (detik) agar ESP32 tidak hang jika tidak ada AP / WiFi mati
+  wm.setConfigPortalTimeout(WM_PORTAL_TIMEOUT_S);
+
+  // Set mode Station dan aktifkan reconnect otomatis
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+
+  Serial.println("\n[WM] Memulai koneksi via WiFiManager...");
+  Serial.printf("[WM] SSID Access Point Konfigurasi: %s\n", WM_AP_NAME);
+
+  bool res;
+  if (strlen(WM_AP_PASSWORD) > 0) {
+    res = wm.autoConnect(WM_AP_NAME, WM_AP_PASSWORD);
+  } else {
+    res = wm.autoConnect(WM_AP_NAME);
+  }
+
+  if (!res) {
+    Serial.println(
+        "[WM] Gagal terhubung atau timeout captive portal tercapai!");
+    Serial.println("[WM] Kontroler tetap bekerja normal dalam mode offline.");
+  } else {
+    Serial.printf("[WM] Berhasil terhubung! IP: %s (SSID: %s)\n",
+                  WiFi.localIP().toString().c_str(), WiFi.SSID().c_str());
+  }
+}
+
+void resetWifiSettings() {
+  Serial.println("[WM] Menghapus data kredensial WiFi dan me-restart ESP32...");
+  WiFiManager wm;
+  wm.resetSettings();
+  delay(1000);
+  ESP.restart();
 }
 
 void loopWifi() { // non-blocking
@@ -1687,8 +1815,8 @@ void loopWifi() { // non-blocking
   if (WiFi.status() == WL_CONNECTED) {
     if (!servicesStarted) {
       servicesStarted = true;
-      Serial.printf("\n[WIFI] Terhubung! IP: %s\n",
-                    WiFi.localIP().toString().c_str());
+      Serial.printf("\n[WIFI] Terhubung! IP: %s (SSID: %s)\n",
+                    WiFi.localIP().toString().c_str(), WiFi.SSID().c_str());
       setupOta();
       setupTelnet();
     }
@@ -1699,8 +1827,9 @@ void loopWifi() { // non-blocking
   if (millis() - tLast < WIFI_RETRY_MS)
     return;
   tLast = millis();
+  Serial.println("[WIFI] Koneksi terputus, mencoba menyambung ulang...");
   WiFi.disconnect();
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.reconnect();
 }
 
 void loopMqtt() {
@@ -1781,9 +1910,7 @@ void setup() {
   snprintf(topEvent, sizeof(topEvent), "%s/event", MQTT_BASE);
   snprintf(topCmd, sizeof(topCmd), "%s/cmd", MQTT_BASE);
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  setupWifi();
 
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setCallback(onMqtt);
